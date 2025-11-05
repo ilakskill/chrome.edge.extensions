@@ -209,7 +209,7 @@
     if (!genAI) genAI = new GoogleGenerativeAI(key);
 
     // New session each reload; SDK maintains context
-    const modelName = modelEl.value.trim() || "gemini-1.5-flash";
+    const modelName = modelEl.value.trim() || "gemini-2.5-flash";
     chatSession = genAI.getGenerativeModel({ model: modelName }).startChat({
       history: [],
       // You can set generationConfig/safetySettings here if desired.
