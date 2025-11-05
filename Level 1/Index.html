@@ -1,1 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Field Tech Assistant (Gemini PoC)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b1220; --fg:#e7ecf3; --muted:#9fb3c8; --accent:#6ea8fe; --card:#111a2e; --you:#1f2b46; --bot:#15233d; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    .wrap{max-width:920px;margin:0 auto;padding:20px}
+    header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}
+    header h1{font-size:18px;margin:0;font-weight:600;letter-spacing:.2px}
+    .panel{background:var(--card);border:1px solid #203055;padding:12px;border-radius:16px;margin-bottom:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .row > *{flex:1}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+    input[type="password"],input[type="text"],textarea,button,select{width:100%;border-radius:12px;border:1px solid #203055;background:#0d162b;color:var(--fg);padding:10px}
+    textarea{min-height:80px;resize:vertical}
+    button{cursor:pointer;background:var(--accent);border-color:transparent;color:#001029;font-weight:600}
+    button[disabled]{opacity:.6;cursor:not-allowed}
+    .chat{height:56vh;overflow:auto;background:linear-gradient(180deg,#0b1220, #0b1220 60%, #0f182d);border:1px solid #203055;border-radius:16px;padding:14px;scroll-behavior:smooth}
+    .msg{display:flex;gap:10px;margin:10px 0}
+    .msg.you{justify-content:flex-end}
+    .bubble{max-width:78%;padding:10px 12px;border-radius:14px}
+    .you .bubble{background:var(--you)}
+    .bot .bubble{background:var(--bot)}
+    .meta{font-size:11px;color:var(--muted);margin-top:4px}
+    .img-grid{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+    .img-grid img{max-height:120px;border-radius:10px;border:1px solid #1d2a43}
+    .footer{display:flex;gap:10px;align-items:flex-end;margin-top:12px}
+    .footer textarea{min-height:48px}
+    .hint{font-size:12px;color:var(--muted)}
+    .pill{display:inline-block;padding:6px 10px;border:1px dashed #29406c;border-radius:999px;font-size:12px;color:var(--muted)}
+    .spinner{width:18px;height:18px;border:3px solid #203055;border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .fileline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .small{font-size:12px}
+    a{color:#a8c7ff}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Field Tech Assistant — Gemini PoC</h1>
+      <span class="pill">Static HTML + JS (GitHub Pages)</span>
+    </header>
 
+    <!-- Quick config -->
+    <div class="panel">
+      <div class="row">
+        <div>
+          <label>Gemini API Key (pastes in memory; not stored)</label>
+          <input id="apiKey" type="password" placeholder="Paste your Google AI Studio API key…" />
+        </div>
+        <div style="max-width:220px">
+          <label>Model</label>
+          <select id="model">
+            <option>gemini-1.5-flash</option>
+            <option>gemini-1.5-pro</option>
+          </select>
+        </div>
+        <div style="max-width:220px">
+          <label>Mode</label>
+          <select id="mode">
+            <option value="direct">Direct to Gemini (PoC)</option>
+            <option value="webhook">Proxy via Webhook (n8n/your backend)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" id="webhookRow" style="display:none">
+        <div>
+          <label>Webhook URL (optional, hides keys in production)</label>
+          <input id="webhookUrl" type="text" placeholder="https://your-n8n-or-backend/webhook/field-assistant" />
+          <div class="hint">If set, messages & images POST here. Backend should call Gemini & Smartsheet safely.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Runbook / context -->
+    <div class="panel">
+      <div class="row">
+        <div>
+          <label>Runbook / Project Notes (optional)</label>
+          <textarea id="runbook" placeholder="Paste scope-of-work steps, acceptance criteria, ticket fields, etc. The assistant will use this as context."></textarea>
+        </div>
+      </div>
+      <div class="fileline">
+        <div>
+          <label class="small">Attach images (photos of deliverables)</label>
+          <input id="images" type="file" accept="image/*" multiple />
+        </div>
+        <div class="hint">Attach only what’s needed. Images travel in the current message.</div>
+      </div>
+    </div>
+
+    <!-- Chat -->
+    <div id="chat" class="chat" aria-live="polite"></div>
+
+    <!-- Composer -->
+    <div class="footer">
+      <textarea id="input" placeholder="Type a message… Try: 'Clock me in on ticket 12345 at Site A'"></textarea>
+      <button id="send">Send</button>
+    </div>
+
+    <div class="hint" style="margin-top:8px">
+      Tip: For a quick demo, paste your API key, type a message, attach a photo, and hit Send. For production, switch Mode to “Proxy via Webhook”.
+    </div>
+  </div>
+
+  <!-- Gemini JS SDK via ESM -->
+  <script type="module">
+  import { GoogleGenerativeAI } from "https://esm.run/@google/generative-ai";
+
+  // ---- UI elements
+  const chatEl = document.getElementById('chat');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const apiKeyEl = document.getElementById('apiKey');
+  const modelEl  = document.getElementById('model');
+  const runbookEl = document.getElementById('runbook');
+  const imagesEl = document.getElementById('images');
+  const modeEl = document.getElementById('mode');
+  const webhookUrlEl = document.getElementById('webhookUrl');
+  const webhookRow = document.getElementById('webhookRow');
+
+  modeEl.addEventListener('change', () => {
+    webhookRow.style.display = modeEl.value === 'webhook' ? '' : 'none';
+  });
+
+  // ---- Simple in-memory state
+  let genAI = null;
+  let chatSession = null;
+  let history = []; // local copy for display; SDK tracks chat history internally
+
+  // Restore last runbook (optional)
+  runbookEl.value = localStorage.getItem('fta_runbook') || '';
+  runbookEl.addEventListener('input', () => {
+    localStorage.setItem('fta_runbook', runbookEl.value);
+  });
+
+  // Utility: DOM helpers
+  function addMessage(role, text, images=[]) {
+    const msg = document.createElement('div');
+    msg.className = 'msg ' + (role === 'user' ? 'you' : 'bot');
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerText = text;
+    msg.appendChild(bubble);
+
+    if (images.length) {
+      const grid = document.createElement('div');
+      grid.className = 'img-grid';
+      images.forEach(src => {
+        const img = document.createElement('img');
+        img.src = src;
+        grid.appendChild(img);
+      });
+      bubble.appendChild(grid);
+    }
+
+    const meta = document.createElement('div');
+    const ts = new Date().toLocaleTimeString();
+    meta.className = 'meta';
+    meta.textContent = (role === 'user' ? 'You' : 'Assistant') + ' • ' + ts;
+    msg.appendChild(meta);
+
+    chatEl.appendChild(msg);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+  function addSpinner() {
+    const row = document.createElement('div');
+    row.className = 'msg bot';
+    row.id = 'spinnerRow';
+    row.innerHTML = `<div class="bubble"><div class="spinner"></div></div>`;
+    chatEl.appendChild(row);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+  function removeSpinner() {
+    const row = document.getElementById('spinnerRow');
+    row && row.remove();
+  }
+
+  // Utility: files -> data URLs / base64
+  const fileToDataUrl = file => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+  const fileToBase64 = file => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const result = r.result;
+      const base64 = result.split(',')[1];
+      res({ base64, mimeType: file.type });
+    };
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+  // Boot a chat session
+  async function ensureChat() {
+    const mode = modeEl.value;
+    if (mode === 'webhook') return; // backend will handle it
+
+    const key = apiKeyEl.value.trim();
+    if (!key) throw new Error("Paste your Gemini API key first.");
+    if (!genAI) genAI = new GoogleGenerativeAI(key);
+
+    // New session each reload; SDK maintains context
+    const modelName = modelEl.value.trim() || "gemini-1.5-flash";
+    chatSession = genAI.getGenerativeModel({ model: modelName }).startChat({
+      history: [],
+      // You can set generationConfig/safetySettings here if desired.
+    });
+  }
+
+  // Compose the prompt with runbook context
+  function buildUserParts(text, imageParts) {
+    const parts = [];
+    // System-style instruction (as part of the user input for PoC)
+    const preface = [
+      "You are Field Tech Assistant.",
+      "Use any provided 'Runbook' strictly as source of truth for steps and acceptance criteria.",
+      "If the user says 'clock in' with a ticket/site, reply with the JSON you would send to a backend: {action:'clock_in', ticket:'...', site:'...', time: ISO}.",
+      "When validating deliverables from photos, reference runbook criteria.",
+    ].join(' ');
+    const runbook = runbookEl.value.trim();
+    if (runbook) {
+      parts.push({ text: preface + "\n\nRunbook:\n" + runbook + "\n\nUser message:\n" + text });
+    } else {
+      parts.push({ text: preface + "\n\nUser message:\n" + text });
+    }
+    // Append images as inlineData
+    for (const p of imageParts) {
+      parts.push({ inlineData: { data: p.base64, mimeType: p.mimeType }});
+    }
+    return parts;
+  }
+
+  // Send message (Direct mode)
+  async function sendDirect(message, files) {
+    await ensureChat();
+    // Convert files
+    const previews = [];
+    const imageParts = [];
+    for (const f of files) {
+      const [dataUrl, b64] = await Promise.all([fileToDataUrl(f), fileToBase64(f)]);
+      previews.push(dataUrl);
+      imageParts.push(b64);
+    }
+    addMessage('user', message, previews);
+    addSpinner();
+    try {
+      const parts = buildUserParts(message, imageParts);
+      const result = await chatSession.sendMessage(parts);
+      const text = result.response?.text?.() ?? "(no response)";
+      removeSpinner();
+      addMessage('assistant', text);
+    } catch (err) {
+      removeSpinner();
+      addMessage('assistant', "Error: " + (err.message || String(err)));
+    }
+  }
+
+  // Send message (Webhook mode)
+  async function sendViaWebhook(message, files) {
+    const url = webhookUrlEl.value.trim();
+    if (!url) { addMessage('assistant', "Set your Webhook URL first."); return; }
+
+    const previews = [];
+    const images = [];
+    for (const f of files) {
+      const [dataUrl, b64] = await Promise.all([fileToDataUrl(f), fileToBase64(f)]);
+      previews.push(dataUrl);
+      images.push(b64); // {base64, mimeType}
+    }
+    addMessage('user', message, previews);
+    addSpinner();
+    try {
+      const payload = {
+        message,
+        runbook: runbookEl.value,
+        images,          // [{base64, mimeType}]
+        meta: { clientTime: new Date().toISOString(), model: modelEl.value }
+      };
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error("Webhook HTTP " + resp.status);
+      const data = await resp.json().catch(() => ({}));
+      removeSpinner();
+      addMessage('assistant', data.reply || JSON.stringify(data));
+    } catch (err) {
+      removeSpinner();
+      addMessage('assistant', "Webhook error: " + (err.message || String(err)));
+    }
+  }
+
+  // Wire up UI
+  async function handleSend() {
+    const text = inputEl.value.trim();
+    const files = Array.from(imagesEl.files || []);
+    if (!text && files.length === 0) return;
+
+    sendBtn.disabled = true;
+    try {
+      if (modeEl.value === 'webhook') {
+        await sendViaWebhook(text, files);
+      } else {
+        await sendDirect(text, files);
+      }
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.value = '';
+      imagesEl.value = '';
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', handleSend);
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  });
+
+  // Warm welcome
+  addMessage('assistant',
+    "Hi! Paste your Gemini API key (or switch to Webhook mode). " +
+    "You can ask me to clock you in, validate deliverables from photos, or summarize the runbook."
+  );
+
+  </script>
+</body>
+</html>
